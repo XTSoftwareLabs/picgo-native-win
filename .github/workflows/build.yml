@@ -1,0 +1,94 @@
+name: Build native PicGo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      picgo-ref:
+        description: PicGo tag to build from Molunerfinn/PicGo
+        type: string
+        default: v3.0.3
+      nativeboat-version:
+        description: NativeBoat release tag, or latest
+        type: string
+        default: latest
+    outputs:
+      picgo-ref:
+        value: ${{ jobs.build.outputs.picgo-ref }}
+      picgo-commit:
+        value: ${{ jobs.build.outputs.picgo-commit }}
+      nativeboat-version:
+        value: ${{ jobs.build.outputs.nativeboat-version }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PICGO_REF: ${{ inputs.picgo-ref || 'v3.0.3' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      picgo-ref: ${{ env.PICGO_REF }}
+      nativeboat-version: ${{ steps.nativeboat.outputs.version }}
+      picgo-commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - name: Check out PicGo source
+        uses: actions/checkout@v7
+        with:
+          repository: Molunerfinn/PicGo
+          ref: ${{ env.PICGO_REF }}
+          path: picgo
+          persist-credentials: false
+
+      - name: Record source commit
+        id: source
+        shell: pwsh
+        run: '"commit=$(git -C picgo rev-parse HEAD)" >> $env:GITHUB_OUTPUT'
+
+      # NativeBoat installs the project's dependencies itself, with the
+      # project's package manager.
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: picgo/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.21.1'
+
+      - name: Build with NativeBoat
+        id: nativeboat
+        uses: XTSoftwareLabs/nativeboat-action@main
+        with:
+          project-path: picgo
+          output-path: ${{ github.workspace }}/native-dist
+          version: ${{ inputs.nativeboat-version || 'latest' }}
+          analyze: 'true'
+
+      - name: Package output
+        shell: pwsh
+        env:
+          OUTPUT: ${{ steps.nativeboat.outputs.output-path }}
+          EXECUTABLE: ${{ steps.nativeboat.outputs.executable }}
+        run: |
+          if (-not $env:EXECUTABLE) { throw 'NativeBoat did not produce a single executable.' }
+          Get-ChildItem -LiteralPath $env:OUTPUT -Recurse | Format-Table FullName, Length
+          $name = "PicGo-$env:PICGO_REF-native-win-x64"
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item -LiteralPath $env:EXECUTABLE -Destination "release/$name.exe"
+          Compress-Archive -Path (Join-Path $env:OUTPUT '*') -DestinationPath "release/$name.zip"
+          Get-ChildItem release | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding utf8NoBOM release/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: picgo-native-win-x64
+          path: release/
+          if-no-files-found: error

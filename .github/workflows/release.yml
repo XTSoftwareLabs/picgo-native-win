@@ -1,0 +1,67 @@
+name: Release native PicGo
+
+on:
+  workflow_dispatch:
+    inputs:
+      picgo-ref:
+        description: PicGo tag to build from Molunerfinn/PicGo; also the release tag
+        required: true
+        default: v3.0.3
+      nativeboat-version:
+        description: NativeBoat release tag, or latest
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.picgo-ref }}
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      picgo-ref: ${{ inputs.picgo-ref }}
+      nativeboat-version: ${{ inputs.nativeboat-version }}
+
+  release:
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: picgo-native-win-x64
+          path: release
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.picgo-ref }}
+          NATIVEBOAT: ${{ needs.build.outputs.nativeboat-version }}
+          COMMIT: ${{ needs.build.outputs.picgo-commit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @"
+          Native Windows x64 build of [PicGo $env:TAG](https://github.com/Molunerfinn/PicGo/releases/tag/$env:TAG)
+          (source commit Molunerfinn/PicGo@$env:COMMIT), compiled with
+          [NativeBoat $env:NATIVEBOAT](https://github.com/XTSoftwareLabs/nativeboat-release/releases/tag/$env:NATIVEBOAT).
+
+          The executable runs without Chromium, WebView2 or Node.js. Download the
+          ``.exe`` to run it directly, or the ``.zip`` for the complete output folder.
+          "@ | Set-Content -Encoding utf8NoBOM notes.md
+          $files = (Get-ChildItem release -File).FullName
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY *> $null
+          $exists = $LASTEXITCODE -eq 0
+          # Fail on any gh error from here on.
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($exists) {
+            gh release edit $env:TAG --repo $env:GITHUB_REPOSITORY --notes-file notes.md
+            gh release upload $env:TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $env:TAG @files --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA `
+              --title "PicGo $env:TAG (native Windows)" --notes-file notes.md
+          }
